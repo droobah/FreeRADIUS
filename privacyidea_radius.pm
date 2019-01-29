@@ -147,8 +147,9 @@ use LWP 6;
 use Config::IniFiles;
 use Data::Dump;
 use Try::Tiny;
-use JSON qw( decode_json );
-
+use JSON qw( decode_json encode_json );
+use Cache::Memcached::Fast;
+use Data::UUID;
 
 # use ...
 # This is very important ! Without this script will not get the filled hashes from main.
@@ -203,6 +204,7 @@ use constant Acct  => 6;
 our $CONFIG_FILE = "";
 our @CONFIG_FILES = ("/etc/privacyidea/rlm_perl.ini", "/etc/freeradius/rlm_perl.ini", "/opt/privacyIDEA/rlm_perl.ini");
 our $Config = {};
+our $MemcacheCfg;
 our $Mapping = {};
 our $cfg_file;
 
@@ -214,6 +216,12 @@ our $cfg_file;
     $Config->{Debug}   = "FALSE";
     $Config->{SSL_CHECK} = "FALSE";
     $Config->{TIMEOUT} = 10;
+    $Config->{ENABLEPINCHANGE} = "FALSE";
+    $Config->{URL_AUTH} = 'https://127.0.0.1/auth';
+    $Config->{URL_SETPIN} = 'https://127.0.0.1/token/setpin';
+
+    $MemcacheCfg->{servers} = ["127.0.0.1:11211"];
+    $MemcacheCfg->{namespace} = 'PIRA:';
 
 
 foreach my $file (@CONFIG_FILES) {
@@ -227,8 +235,39 @@ foreach my $file (@CONFIG_FILES) {
 	    $Config->{Debug}   = $cfg_file->val("Default", "DEBUG");
 	    $Config->{SSL_CHECK} = $cfg_file->val("Default", "SSL_CHECK");
 	    $Config->{TIMEOUT} = $cfg_file->val("Default", "TIMEOUT", 10);
-            $Config->{CLIENTATTRIBUTE} = $cfg_file->val("Default", "CLIENTATTRIBUTE");
+        $Config->{CLIENTATTRIBUTE} = $cfg_file->val("Default", "CLIENTATTRIBUTE");
+        $Config->{ENABLEPINCHANGE} = $cfg_file->val("Default", "ENABLEPINCHANGE");
+        $Config->{URL_AUTH} = $cfg_file->val("Default", "URL_AUTH");
+        $Config->{URL_SETPIN} = $cfg_file->val("Default", "URL_SETPIN");
 	}	
+}
+
+sub saveResponse {
+    my $transactionid = shift;
+    my $subtask = shift;
+    my $data = shift;
+    my $lastpin = shift;
+
+    my $memd = new Cache::Memcached::Fast($MemcacheCfg);
+    $memd->set($transactionid, {'subtask' => $subtask, 'data' => $data, 'lastpin' => $lastpin});
+}
+
+sub loadResponse {
+    my $transactionid = shift;
+    my %savedResponse;
+
+    my $memd = new Cache::Memcached::Fast($MemcacheCfg);
+    my $tmp = $memd->get($transactionid);
+    if ($tmp) { %savedResponse = %{$tmp} };
+
+    return %savedResponse;
+}
+
+sub removeResponse {
+    my $transactionid = shift;
+
+    my $memd = new Cache::Memcached::Fast($MemcacheCfg);
+    $memd->delete($transactionid);
 }
 
 sub mapResponse {
@@ -312,8 +351,11 @@ sub authenticate {
 
     # we inherrit the defaults
     my $URL     = $Config->{URL};
+    my $URL_AUTH = $Config->{URL_AUTH};
+    my $URL_SETPIN = $Config->{URL_SETPIN};
     my $REALM   = $Config->{REALM};
     my $RESCONF = $Config->{RESCONF};
+    my $ENABLEPINCHANGE = $Config->{ENABLEPINCHANGE};
     
     my $debug   = false;
     if ( $Config->{Debug} =~ /true/i ) {
@@ -334,20 +376,28 @@ sub authenticate {
     my $auth_type = $RAD_CONFIG{"Auth-Type"};
 
     try {
-	&radiusd::radlog( Info, "Looking for config for auth-type $auth_type");
-	if ( ( $cfg_file->val( $auth_type, "URL") )) {
+        &radiusd::radlog( Info, "Looking for config for auth-type $auth_type");
+        if ( ( $cfg_file->val( $auth_type, "URL") )) {
             $URL = $cfg_file->val( $auth_type, "URL" );
         }
-	if ( ( $cfg_file->val( $auth_type, "REALM") )) {
+        if ( ( $cfg_file->val( $auth_type, "URL_AUTH") )) {
+            $URL_AUTH = $cfg_file->val( $auth_type, "URL_AUTH" );
+        }
+        if ( ( $cfg_file->val( $auth_type, "URL_SETPIN") )) {
+            $URL_SETPIN = $cfg_file->val( $auth_type, "URL_SETPIN" );
+        }
+	    if ( ( $cfg_file->val( $auth_type, "REALM") )) {
             $REALM = $cfg_file->val( $auth_type, "REALM" );
         }  
         if ( ( $cfg_file->val( $auth_type, "RESCONF") )) {
             $RESCONF = $cfg_file->val( $auth_type, "RESCONF" );
         }
-      }
-      catch {
+        if ( ( $cfg_file->val( $auth_type, "ENABLEPINCHANGE") )) {
+            $ENABLEPINCHANGE = $cfg_file->val( $auth_type, "ENABLEPINCHANGE" );
+        }
+    } catch {
         &radiusd::radlog( Info, "Warning: $@" );
-      };
+    };
 
     if ( $debug == true ) {
         &log_request_attributes;
@@ -365,12 +415,15 @@ sub authenticate {
     }
     if ( exists( $RAD_REQUEST{'User-Name'} ) ) {
         $params{"user"} = $RAD_REQUEST{'User-Name'};
+        $params{"username"} = $RAD_REQUEST{'User-Name'};
     }
     if ( exists( $RAD_REQUEST{'Stripped-User-Name'} )) {
         $params{"user"} = $RAD_REQUEST{'Stripped-User-Name'};
+        $params{"username"} = $RAD_REQUEST{'Stripped-User-Name'};
     }
     if ( exists( $RAD_REQUEST{'User-Password'} ) ) {
         $params{"pass"} = $RAD_REQUEST{'User-Password'};
+        $params{"password"} = $RAD_REQUEST{'User-Password'};
     }
     if ( exists( $RAD_REQUEST{'NAS-IP-Address'} ) ) {
         $params{"client"} = $RAD_REQUEST{'NAS-IP-Address'};
@@ -389,92 +442,315 @@ sub authenticate {
         $params{"resConf"} = $RESCONF;
     }
 
-    &radiusd::radlog( Info, "Auth-Type: $auth_type" );
-    &radiusd::radlog( Info, "url: $URL" );
-    &radiusd::radlog( Info, "user sent to privacyidea: $params{'user'}" );
-    &radiusd::radlog( Info, "realm sent to privacyidea: $params{'realm'}" );
-    &radiusd::radlog( Info, "resolver sent to privacyidea: $params{'resConf'}" );
-    &radiusd::radlog( Info, "client sent to privacyidea: $params{'client'}" );
-    &radiusd::radlog( Info, "state sent to privacyidea: $params{'state'}" );
-    if ( $debug == true ) {
-        &radiusd::radlog( Debug, "urlparam $_ = $params{$_}\n" )
-          for ( keys %params );
-    }
-    else {
-        &radiusd::radlog( Info, "urlparam $_ \n" ) for ( keys %params );
+    # If PIN Change is enabled, change the URL and load the last response
+    my $use_saved_request = false;
+    my %saved_request;
+    my $new_pin;
+    if ($ENABLEPINCHANGE) {
+        $URL = $URL_AUTH;
+
+        #check for an existing pin-change transaction
+        if ($params{'state'}) {
+            %saved_request = loadResponse($params{'state'});
+            if (%saved_request) {
+                if ($saved_request{subtask} eq "pin_save") {
+                    #only need the PIN to be used later
+                    $new_pin = $saved_request{lastpin};
+                } else {
+                    #will be using the whole request instead of requesting a new one
+                    $use_saved_request = true;
+                }
+                removeResponse($params{'state'});
+            }
+        }
     }
 
-    my $ua     = LWP::UserAgent->new();
-    $ua->env_proxy;
-    $ua->timeout($timeout);
-    &radiusd::radlog( Info, "Request timeout: $timeout " );
-    # Set the user-agent to be fetched in privacyIDEA Client Application Type
-    $ua->agent("FreeRADIUS");
-	if ($check_ssl == false) {
-		try {
-			# This is only availble with with LWP version 6
-        	&radiusd::radlog( Info, "Not verifying SSL certificate!" );
-			$ua->ssl_opts( verify_hostname => 0, SSL_verify_mode => 0x00 );
-		} catch {
-            &radiusd::radlog( Error, "ssl_opts only supported with LWP 6. error: $@" );
-		}
-	}
-    my $response = $ua->post( $URL, \%params );
-    my $content  = $response->decoded_content();
-    if ( $debug == true ) {
-        &radiusd::radlog( Debug, "Content $content" );
-    }
+    my $content;
+    my $response;
+
     $RAD_REPLY{'Reply-Message'} = "privacyIDEA server denied access!";
     my $g_return = RLM_MODULE_REJECT;
 
-    if ( !$response->is_success ) {
-        # This was NO OK 200 response
-        my $status = $response->status_line;
-        &radiusd::radlog( Info, "privacyIDEA request failed: $status" );
-        $RAD_REPLY{'Reply-Message'} = "privacyIDEA request failed: $status";
-        $g_return = RLM_MODULE_FAIL;
-    }
-    try {
-        my $decoded = decode_json( $content );
-        my $message = $decoded->{detail}{message};
-        if ( $decoded->{result}{value} ) {
-            &radiusd::radlog( Info, "privacyIDEA access granted" );
-            $RAD_REPLY{'Reply-Message'} = "privacyIDEA access granted";            
+    if ($use_saved_request) {
+        $content = $saved_request{'data'};
+        my $decoded = decode_json($content);
+        my $currentpin = $params{'password'};
+        # check to see which state we're in
+        # 1. initial pin-set
+        # 2. confirm pin
+        # 3. return to standard flow
+        if ($saved_request{'subtask'} eq "pin_set") {
+            # send a request to confirm the PIN
+            my $pin_transaction = Data::UUID->new->create_str();
+            saveResponse($pin_transaction,'pin_confirm',$content,$currentpin);
+
+            #before granting access, we must ask the user to update their PIN
+            &radiusd::radlog(Info, "privacyIDEA confirm new PIN");
+
+            $RAD_REPLY{'Reply-Message'} = "\r\nPlease re-enter new PIN:";
+            $RAD_REPLY{'State'} = $pin_transaction;
+            &radiusd::radlog(Debug, $RAD_REPLY{'State'});
+            $RAD_CHECK{'Response-Packet-Type'} = "Access-Challenge";
             # Add the response hash to the Radius Reply
-            %RAD_REPLY = ( %RAD_REPLY, mapResponse($decoded));
-            $g_return = RLM_MODULE_OK;
+            %RAD_REPLY = (%RAD_REPLY, mapResponse($decoded));
+            $g_return = RLM_MODULE_HANDLED;
+            &radiusd::radlog(Info, "return $ret_hash->{$g_return}");
+            return $g_return;
+        } elsif ($saved_request{'subtask'} eq "pin_confirm") {
+            if ($saved_request{'lastpin'} eq $currentpin) {
+                &radiusd::radlog(Info, "privacyIDEA PIN set successful");
+
+                $new_pin = $currentpin;
+                # inject the previous content into the stream
+                delete $decoded->{detail}{pin_change}; # prevent a PIN change loop
+                $content = encode_json($decoded);
+                if ($debug == true) {
+                    &radiusd::radlog(Debug, "Content $content");
+                }
+            } else {
+                # confirmed PIN doesn't match - auth fail
+                &radiusd::radlog(Debug, "privacyIDEA PIN confirmation incorrect");
+                &radiusd::radlog(Info, "return $ret_hash->{$g_return}");
+                return $g_return;
+            }
+        } else {
+            # invalid subtask. fail the auth
+            &radiusd::radlog(Debug, "privacyIDEA Invalid PIN Change State - $saved_request{'subtask'}");
+            &radiusd::radlog(Info, "return $ret_hash->{$g_return}");
+            return $g_return;
         }
-        elsif ( $decoded->{result}{status} ) {
-            &radiusd::radlog( Info, "privacyIDEA Result status is true!" );
-            $RAD_REPLY{'Reply-Message'} = $decoded->{detail}{message};
-            if ( $decoded->{detail}{transaction_id} ) {
-                ## we are in challenge response mode:
-                ## 1. split the response in fail, state and challenge
-                ## 2. show the client the challenge and the state
-                ## 3. get the response and
-                ## 4. submit the response and the state to linotp and
-                ## 5. reply ok or reject
-                $RAD_REPLY{'State'} = $decoded->{detail}{transaction_id};
+    } else {
+        &radiusd::radlog(Info, "Auth-Type: $auth_type");
+        &radiusd::radlog(Info, "url: $URL");
+        &radiusd::radlog(Info, "user sent to privacyidea: $params{'user'}");
+        &radiusd::radlog(Info, "realm sent to privacyidea: $params{'realm'}");
+        &radiusd::radlog(Info, "resolver sent to privacyidea: $params{'resConf'}");
+        &radiusd::radlog(Info, "client sent to privacyidea: $params{'client'}");
+        &radiusd::radlog(Info, "state sent to privacyidea: $params{'state'}");
+        if ($debug == true) {
+            &radiusd::radlog(Debug, "urlparam $_ = $params{$_}\n")
+                for (keys %params);
+        }
+        else {
+            &radiusd::radlog(Info, "urlparam $_ \n") for (keys %params);
+        }
+
+        my $ua = LWP::UserAgent->new();
+        $ua->env_proxy;
+        $ua->timeout($timeout);
+        &radiusd::radlog(Info, "Request timeout: $timeout ");
+        # Set the user-agent to be fetched in privacyIDEA Client Application Type
+        $ua->agent("FreeRADIUS");
+        if ($check_ssl == false) {
+            try {
+                # This is only availble with with LWP version 6
+                &radiusd::radlog(Info, "Not verifying SSL certificate!");
+                $ua->ssl_opts(verify_hostname => 0, SSL_verify_mode => 0x00);
+            }
+            catch {
+                &radiusd::radlog(Error, "ssl_opts only supported with LWP 6. error: $@");
+            }
+        }
+        $response = $ua->post($URL, \%params);
+        $content = $response->decoded_content();
+        if ($debug == true) {
+            &radiusd::radlog(Debug, "Content $content");
+        }
+    }
+
+    if ($ENABLEPINCHANGE) {
+        my $decoded;
+        try {
+            $decoded = decode_json($content);
+        } catch {
+            &radiusd::radlog(Info, "Can not parse response from privacyIDEA.");
+            &radiusd::radlog(Error, "caught error: $_");
+        };
+        # handle /auth response (skip if $response is null)
+        if ($response && !$response->is_success) {
+            # This was NO OK 200 response
+            # Check for 401 with serial+transaction_id (challenge)
+            if ($response->code != 401 || !$decoded->{detail}{transaction_id}) {
+                # Authentication failure with no challenge requested
+                my $status = $response->status_line;
+                &radiusd::radlog(Info, "privacyIDEA request failed: $status");
+                $RAD_REPLY{'Reply-Message'} = "privacyIDEA request failed: $status";
+                $g_return = RLM_MODULE_FAIL;
+            }
+        }
+        try {
+            my $message = $decoded->{detail}{message};
+            my $pin_change_requested = $decoded->{detail}{pin_change};
+            my $pin_transaction;
+
+            if ($pin_change_requested) {
+                &radiusd::radlog(Info, "privacyIDEA PIN change flag detected");
+                &radiusd::radlog(Debug, $pin_transaction);
+                $pin_transaction = Data::UUID->new->create_str();
+                saveResponse($pin_transaction,'pin_set',$content,"");
+
+                #before granting access, we must ask the user to update their PIN
+                &radiusd::radlog(Info, "privacyIDEA requesting new PIN");
+
+                $RAD_REPLY{'Reply-Message'} = "\r\nEnter a new PIN having from 4 to 8 digits:";
+                $RAD_REPLY{'State'} = $pin_transaction;
+                &radiusd::radlog(Debug, $RAD_REPLY{'State'});
                 $RAD_CHECK{'Response-Packet-Type'} = "Access-Challenge";
                 # Add the response hash to the Radius Reply
-				%RAD_REPLY = ( %RAD_REPLY, mapResponse($decoded));
-                $g_return  = RLM_MODULE_HANDLED;
+                %RAD_REPLY = (%RAD_REPLY, mapResponse($decoded));
+                $g_return = RLM_MODULE_HANDLED;
             } else {
-                &radiusd::radlog( Info, "privacyIDEA access denied" );
+                if ($decoded->{result}{value}) {
+                    &radiusd::radlog(Info, "privacyIDEA access granted");
+                    # if new_pin is available, send the PIN set request
+                    if ($new_pin) {
+                        my $auth_token = $decoded->{result}{value}{token};
+                        my $token_serial = $decoded->{detail}{serial};
+                        if ($auth_token && $token_serial) {
+                            my %pinparams = ();
+                            $pinparams{"serial"} = $token_serial;
+                            $pinparams{"otppin"} = $new_pin;
+
+                            &radiusd::radlog(Info, "privacyIDEA setting PIN");
+                            &radiusd::radlog(Info, "url: $URL_SETPIN");
+                            &radiusd::radlog(Info, "tokenserial sent to privacyidea: $token_serial");
+                            if ($debug == true) {
+                                &radiusd::radlog(Debug, "urlparam $_ = $pinparams{$_}\n")
+                                    for (keys %pinparams);
+                            }
+                            else {
+                                &radiusd::radlog(Info, "urlparam $_ \n") for (keys %pinparams);
+                            }
+
+                            my $pua = LWP::UserAgent->new();
+                            $pua->default_header('Authorization' => $auth_token);
+                            $pua->env_proxy;
+                            $pua->timeout($timeout);
+                            &radiusd::radlog(Info, "Request timeout: $timeout ");
+                            # Set the user-agent to be fetched in privacyIDEA Client Application Type
+                            $pua->agent("FreeRADIUS");
+                            if ($check_ssl == false) {
+                                try {
+                                    # This is only availble with with LWP version 6
+                                    &radiusd::radlog(Info, "Not verifying SSL certificate!");
+                                    $pua->ssl_opts(verify_hostname => 0, SSL_verify_mode => 0x00);
+                                }
+                                catch {
+                                    &radiusd::radlog(Error, "ssl_opts only supported with LWP 6. error: $@");
+                                }
+                            }
+                            my $pinresponse = $pua->post("$URL_SETPIN", \%pinparams);
+                            my $pincontent = $pinresponse->decoded_content();
+                            if ($debug == true) {
+                                &radiusd::radlog(Debug, "PIN Set Content $pincontent");
+                            }
+                        } else {
+                            &radiusd::radlog(Error, "privacyIDEA unable to set PIN");
+                        }
+                    }
+                    # authentication successful, no challenges remain
+                    $RAD_REPLY{'Reply-Message'} = "privacyIDEA access granted";
+                    # Add the response hash to the Radius Reply
+                    %RAD_REPLY = (%RAD_REPLY, mapResponse($decoded));
+                    $g_return = RLM_MODULE_OK;
+                }
+                elsif ($decoded->{detail}{transaction_id}) {
+                    # transaction_id exists so this is a challenge response
+                    &radiusd::radlog(Info, "privacyIDEA Result transaction_id exists!");
+                    $RAD_REPLY{'Reply-Message'} = $decoded->{detail}{message};
+                    if ($decoded->{detail}{transaction_id}) {
+                        ## we are in challenge response mode:
+                        ## 1. split the response in fail, state and challenge
+                        ## 2. show the client the challenge and the state
+                        ## 3. get the response and
+                        ## 4. submit the response and the state to linotp and
+                        ## 5. reply ok or reject
+                        $RAD_REPLY{'State'} = $decoded->{detail}{transaction_id};
+                        $RAD_CHECK{'Response-Packet-Type'} = "Access-Challenge";
+                        # Add the response hash to the Radius Reply
+                        %RAD_REPLY = (%RAD_REPLY, mapResponse($decoded));
+                        $g_return = RLM_MODULE_HANDLED;
+
+                        #if new_pin is available, save it off for next request
+                        if ($new_pin) {
+                            saveResponse($RAD_REPLY{'State'},"pin_save","",$new_pin);
+                        }
+                    }
+                    else {
+                        &radiusd::radlog(Info, "privacyIDEA access denied");
+                        #$RAD_REPLY{'Reply-Message'} = "privacyIDEA access denied";
+                        $g_return = RLM_MODULE_REJECT;
+                    }
+                }
+                elsif (!$decoded->{result}{status}) {
+                    &radiusd::radlog(Info, "privacyIDEA Result status is false!");
+                    $RAD_REPLY{'Reply-Message'} = $decoded->{result}{error}{message};
+                    &radiusd::radlog(Info, "privacyIDEA access denied");
+                    #$RAD_REPLY{'Reply-Message'} = "privacyIDEA access denied";
+                    $g_return = RLM_MODULE_REJECT;
+                }
+            }
+        }
+        catch {
+            &radiusd::radlog(Info, "Can not parse response from privacyIDEA.");
+            &radiusd::radlog(Error, "caught error: $_");
+        };
+    } else {
+        # handle /validate/check response
+        if (!$response->is_success) {
+            # This was NO OK 200 response
+            my $status = $response->status_line;
+            &radiusd::radlog(Info, "privacyIDEA request failed: $status");
+            $RAD_REPLY{'Reply-Message'} = "privacyIDEA request failed: $status";
+            $g_return = RLM_MODULE_FAIL;
+        }
+        try {
+            my $decoded = decode_json($content);
+            my $message = $decoded->{detail}{message};
+            my $pin_change_requested = $decoded->{detail}{pin_change};
+            if ($decoded->{result}{value}) {
+                &radiusd::radlog(Info, "privacyIDEA access granted");
+                $RAD_REPLY{'Reply-Message'} = "privacyIDEA access granted";
+                # Add the response hash to the Radius Reply
+                %RAD_REPLY = (%RAD_REPLY, mapResponse($decoded));
+                $g_return = RLM_MODULE_OK;
+            }
+            elsif ($decoded->{result}{status}) {
+                &radiusd::radlog(Info, "privacyIDEA Result status is true!");
+                $RAD_REPLY{'Reply-Message'} = $decoded->{detail}{message};
+                if ($decoded->{detail}{transaction_id}) {
+                    ## we are in challenge response mode:
+                    ## 1. split the response in fail, state and challenge
+                    ## 2. show the client the challenge and the state
+                    ## 3. get the response and
+                    ## 4. submit the response and the state to linotp and
+                    ## 5. reply ok or reject
+                    $RAD_REPLY{'State'} = $decoded->{detail}{transaction_id};
+                    $RAD_CHECK{'Response-Packet-Type'} = "Access-Challenge";
+                    # Add the response hash to the Radius Reply
+                    %RAD_REPLY = (%RAD_REPLY, mapResponse($decoded));
+                    $g_return = RLM_MODULE_HANDLED;
+                }
+                else {
+                    &radiusd::radlog(Info, "privacyIDEA access denied");
+                    #$RAD_REPLY{'Reply-Message'} = "privacyIDEA access denied";
+                    $g_return = RLM_MODULE_REJECT;
+                }
+            }
+            elsif (!$decoded->{result}{status}) {
+                &radiusd::radlog(Info, "privacyIDEA Result status is false!");
+                $RAD_REPLY{'Reply-Message'} = $decoded->{result}{error}{message};
+                &radiusd::radlog(Info, "privacyIDEA access denied");
                 #$RAD_REPLY{'Reply-Message'} = "privacyIDEA access denied";
                 $g_return = RLM_MODULE_REJECT;
             }
         }
-        elsif ( !$decoded->{result}{status}) {
-            &radiusd::radlog( Info, "privacyIDEA Result status is false!" );
-            $RAD_REPLY{'Reply-Message'} = $decoded->{result}{error}{message};
-            &radiusd::radlog( Info, "privacyIDEA access denied" );
-            #$RAD_REPLY{'Reply-Message'} = "privacyIDEA access denied";
-            $g_return = RLM_MODULE_REJECT;
-        }
-    } catch {
-        &radiusd::radlog( Info, "Can not parse response from privacyIDEA." );
-    };
+        catch {
+            &radiusd::radlog(Info, "Can not parse response from privacyIDEA.");
+            &radiusd::radlog(Error, "caught error: $_");
+        };
+    }
+
 
     &radiusd::radlog( Info, "return $ret_hash->{$g_return}" );
     return $g_return;
