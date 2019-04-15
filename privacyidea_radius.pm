@@ -20,7 +20,7 @@
 #               Add the possibility to read config from
 #		/etc/privacyidea/rlm_perl.ini
 #    2015-06-10 Cornelius Kölbel <cornelius.koelbel@netknights.it>
-#               Add using of Stripped-User-Name and Realm from the
+#               Add using of Stripped-User-Name and Realm from the 
 #               RAD_REQUEST
 #    2015-04-10 Cornelius Kölbel <cornelius.koelbel@netknights.it>
 #               fix typo in log
@@ -29,22 +29,22 @@
 #    2014-06-25 Cornelius Kölbel
 #               changed the used modules from Config::Files to Config::IniFile
 #		        to make it easily run on CentOS with EPEL, without CPAN
-#
+#                      
 #    Copyright (C) 2010 - 2014 LSE Leading Security Experts GmbH
-#
+# 
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
 #    the Free Software Foundation, either version 2 of the License, or
 #    (at your option) any later version.
-#
+# 
 #    This program is distributed in the hope that it will be useful,
 #    but WITHOUT ANY WARRANTY; without even the implied warranty of
 #    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 #    GNU General Public License for more details.
-#
+# 
 #   You should have received a copy of the GNU General Public License
 #   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-#
+# 
 #
 #   Copyright 2002  The FreeRADIUS server project
 #   Copyright 2002  Boian Jordanov <bjordanov@orbitel.bg>
@@ -64,23 +64,23 @@
 
 =head1 NAME
 
-freeradius_perl - Perl module for use with FreeRADIUS rlm_perl, to authenticate against
+freeradius_perl - Perl module for use with FreeRADIUS rlm_perl, to authenticate against 
   LinOTP      http://www.linotp.org
   privacyIDEA http://www.privacyidea.org
 
 =head1 SYNOPSIS
 
-   use with freeradius:
-
+   use with freeradius:  
+   
    Configure rlm_perl to work with privacyIDEA:
-   in /etc/freeradius/users
+   in /etc/freeradius/users 
     set:
      DEFAULT Auth-type := perl
 
   in /etc/freeradius/modules/perl
      point
      perl {
-         module =
+         module = 
   to this file
 
   in /etc/freeradius/sites-enabled/<yoursite>
@@ -93,33 +93,33 @@ freeradius_perl - Perl module for use with FreeRADIUS rlm_perl, to authenticate 
 
 This module enables freeradius to authenticate using privacyIDEA or LinOTP.
 
-   TODO:
+   TODO: 
      * checking of server certificate
 
 
 =head2 Methods
 
    * authenticate
-
+   
 
 =head1 CONFIGURATION
 
-The authentication request with its URL and default LinOTP/privacyIDEA Realm
+The authentication request with its URL and default LinOTP/privacyIDEA Realm 
 could be defined in a dedicated configuration file, which is expected to be:
 
   /opt/privacyIDEA/rlm_perl.ini
-
+  
 This configuration file could contain default definition for URL and REALM like
   [Default]
   URL = http://192.168.56.1:5001/validate/check
-  REALM =
+  REALM =  
 
-But as well could contain "Access-Type" specific configurations, e.g. for the
+But as well could contain "Access-Type" specific configurations, e.g. for the 
 Access-Type 'scope1', this would look like:
 
   [Default]
   URL = https://localhost/validate/check
-  REALM =
+  REALM =  
   CLIENTATTRIBUTE = Calling-Station-Id
 
   [scope1]
@@ -135,7 +135,7 @@ Cornelius Koelbel (conrelius@privacyidea.org)
 
 Copyright 2013, 2014
 
-This library is free software; you can redistribute it
+This library is free software; you can redistribute it 
 under the GPLv2.
 
 =head1 SEE ALSO
@@ -178,12 +178,12 @@ use constant RLM_MODULE_NOOP     => 7; #  /* module succeeded without doing anyt
 use constant RLM_MODULE_UPDATED  => 8; #  /* OK (pairs modified) */
 use constant RLM_MODULE_NUMCODES => 9; #  /* How many return codes there are */
 
-our $ret_hash = {
+our $ret_hash = { 
     0 => "RLM_MODULE_REJECT",
     1 => "RLM_MODULE_FAIL",
     2 => "RLM_MODULE_OK",
     3 => "RLM_MODULE_HANDLED",
-    4 => "RLM_MODULE_INVALID",
+    4 => "RLM_MODULE_INVALID", 
     5 => "RLM_MODULE_USERLOCK",
     6 => "RLM_MODULE_NOTFOUND",
     7 => "RLM_MODULE_NOOP",
@@ -244,7 +244,7 @@ foreach my $file (@CONFIG_FILES) {
         $Config->{ENABLEPINCHANGE} = $cfg_file->val("Default", "ENABLEPINCHANGE");
         $Config->{URL_AUTH} = $cfg_file->val("Default", "URL_AUTH");
         $Config->{URL_SETPIN} = $cfg_file->val("Default", "URL_SETPIN");
-	}
+	}	
 }
 
 sub saveResponse {
@@ -318,8 +318,8 @@ sub mapResponse {
 				my @values = ();
 				if (ref($attributevalue) eq "") {
 					&radiusd::radlog(Info, "+++++++ User attribute is a string: $attributevalue");
-					push(@values, $attributevalue);
-				}
+					push(@values, $attributevalue);	
+				} 
 				if (ref($attributevalue) eq "ARRAY") {
 					&radiusd::radlog(Info, "+++++++ User attribute is a list: $attributevalue");
 					@values = @$attributevalue;
@@ -337,20 +337,20 @@ sub mapResponse {
 			}
 		}
 	}
-
+	
 	foreach my $key ($cfg_file->Parameters("Mapping")) {
 		my $radiusAttribute = $cfg_file->val("Mapping", $key);
 		&radiusd::radlog( Info, "+++ Map: $key -> $radiusAttribute");
 		$radReply{$radiusAttribute} = $decoded->{detail}{$key};
 	}
-
+	
 	return %radReply;
 }
 
 # Function to handle authenticate
 sub authenticate {
 
-    ## show where the config comes from -
+    ## show where the config comes from - 
     # in the module init we can't print this out, so it starts here
     &radiusd::radlog( Info, "Config File $CONFIG_FILE ".$Config->{FSTAT} );
 
@@ -361,7 +361,7 @@ sub authenticate {
     my $REALM   = $Config->{REALM};
     my $RESCONF = $Config->{RESCONF};
     my $ENABLEPINCHANGE = $Config->{ENABLEPINCHANGE};
-
+    
     my $debug   = false;
     if ( $Config->{Debug} =~ /true/i ) {
         $debug = true;
@@ -393,7 +393,7 @@ sub authenticate {
         }
 	    if ( ( $cfg_file->val( $auth_type, "REALM") )) {
             $REALM = $cfg_file->val( $auth_type, "REALM" );
-        }
+        }  
         if ( ( $cfg_file->val( $auth_type, "RESCONF") )) {
             $RESCONF = $cfg_file->val( $auth_type, "RESCONF" );
         }
@@ -477,14 +477,13 @@ sub authenticate {
 
     my $content;
     my $response;
-	my $coder = JSON->new->ascii->pretty->allow_nonref;
 
     $RAD_REPLY{'Reply-Message'} = "privacyIDEA server denied access!";
     my $g_return = RLM_MODULE_REJECT;
 
     if ($use_saved_request) {
         $content = $saved_request{'data'};
-        my $decoded = decode($content);
+        my $decoded = decode_json($content);
         my $currentpin = $params{'password'};
         # check to see which state we're in
         # 1. initial pin-set
@@ -575,7 +574,8 @@ sub authenticate {
     if ($ENABLEPINCHANGE) {
         my $decoded;
         try {
-            $decoded = $coder->decode($content);
+			my $coder = JSON->new->ascii->pretty->allow_nonref;
+            $decoded = $coder->decode_json($content);
         } catch {
             &radiusd::radlog(Info, "Can not parse response from privacyIDEA.");
             &radiusd::radlog(Error, "caught error: $_");
@@ -725,7 +725,8 @@ sub authenticate {
             $g_return = RLM_MODULE_FAIL;
         }
         try {
-            my $decoded = $coder->decode($content);
+			my $coder = JSON->new->ascii->pretty->allow_nonref;
+            my $decoded = $coder->decode_json($content);
             my $message = $decoded->{detail}{message};
             if ($decoded->{result}{value}) {
                 &radiusd::radlog(Info, "privacyIDEA access granted");
