@@ -477,13 +477,14 @@ sub authenticate {
 
     my $content;
     my $response;
+	my $coder = JSON->new->ascii->pretty->allow_nonref;
 
     $RAD_REPLY{'Reply-Message'} = "privacyIDEA server denied access!";
     my $g_return = RLM_MODULE_REJECT;
 
     if ($use_saved_request) {
         $content = $saved_request{'data'};
-        my $decoded = decode_json($content);
+        my $decoded = $coder->decode($content);
         my $currentpin = $params{'password'};
         # check to see which state we're in
         # 1. initial pin-set
@@ -574,8 +575,7 @@ sub authenticate {
     if ($ENABLEPINCHANGE) {
         my $decoded;
         try {
-			my $coder = JSON->new->ascii->pretty->allow_nonref;
-            $decoded = $coder->decode_json($content);
+            $decoded = $coder->decode($content);
         } catch {
             &radiusd::radlog(Info, "Can not parse response from privacyIDEA.");
             &radiusd::radlog(Error, "caught error: $_");
@@ -725,8 +725,7 @@ sub authenticate {
             $g_return = RLM_MODULE_FAIL;
         }
         try {
-			my $coder = JSON->new->ascii->pretty->allow_nonref;
-            my $decoded = $coder->decode_json($content);
+            my $decoded = $coder->decode($content);
             my $message = $decoded->{detail}{message};
             if ($decoded->{result}{value}) {
                 &radiusd::radlog(Info, "privacyIDEA access granted");
