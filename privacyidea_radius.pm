@@ -1,5 +1,7 @@
 #
 #    privacyIDEA FreeRADIUS plugin
+#    2019-03-17 Cornelius Kölbel <cornelius.koelbel@netknights.it>
+#               Add password splitting
 #    2018-01-12 Cornelius Kölbel <cornelius.koelbel@netknights.it>
 #               Substrings of multivalue user attributes can be added
 #               to the RADIUS response.
@@ -147,7 +149,8 @@ use LWP 6;
 use Config::IniFiles;
 use Data::Dump;
 use Try::Tiny;
-use JSON qw( decode_json encode_json );
+use JSON;
+use Time::HiRes qw( gettimeofday tv_interval );
 use Cache::Memcached::Fast;
 use Data::UUID;
 
@@ -216,6 +219,7 @@ our $cfg_file;
     $Config->{Debug}   = "FALSE";
     $Config->{SSL_CHECK} = "FALSE";
     $Config->{TIMEOUT} = 10;
+	$Config->{SPLIT_NULL_BYTE} = "FALSE";
     $Config->{ENABLEPINCHANGE} = "FALSE";
     $Config->{URL_AUTH} = 'https://127.0.0.1/auth';
     $Config->{URL_SETPIN} = 'https://127.0.0.1/token/setpin';
@@ -233,6 +237,7 @@ foreach my $file (@CONFIG_FILES) {
 	    $Config->{REALM}   = $cfg_file->val("Default", "REALM");
 	    $Config->{RESCONF} = $cfg_file->val("Default", "RESCONF");
 	    $Config->{Debug}   = $cfg_file->val("Default", "DEBUG");
+        $Config->{SPLIT_NULL_BYTE} = $cfg_file->val("Default", "SPLIT_NULL_BYTE");
 	    $Config->{SSL_CHECK} = $cfg_file->val("Default", "SSL_CHECK");
 	    $Config->{TIMEOUT} = $cfg_file->val("Default", "TIMEOUT", 10);
         $Config->{CLIENTATTRIBUTE} = $cfg_file->val("Default", "CLIENTATTRIBUTE");
@@ -307,7 +312,7 @@ sub mapResponse {
 					$attributevalue = $decoded->{detail}{$userAttribute};
 					&radiusd::radlog( Info, "++++++ no directory");
 				} else {
-					$attributevalue = $decoded->{detail}{user}{$userAttribute};
+					$attributevalue = $decoded->{detail}{$directory}{$userAttribute};
 					&radiusd::radlog( Info, "++++++ searching in directory $directory");
 				}
 				my @values = ();
@@ -422,8 +427,13 @@ sub authenticate {
         $params{"username"} = $RAD_REQUEST{'Stripped-User-Name'};
     }
     if ( exists( $RAD_REQUEST{'User-Password'} ) ) {
-        $params{"pass"} = $RAD_REQUEST{'User-Password'};
-        $params{"password"} = $RAD_REQUEST{'User-Password'};
+        my $password = $RAD_REQUEST{'User-Password'};
+        if ( $Config->{SPLIT_NULL_BYTE} =~ /true/i ) {
+            my @p = split(/\0/, $password);
+            $password = @p[0];
+        }
+        $params{"pass"} = $password;
+		$params{"password"} = $password;
     }
     if ( exists( $RAD_REQUEST{'NAS-IP-Address'} ) ) {
         $params{"client"} = $RAD_REQUEST{'NAS-IP-Address'};
@@ -551,8 +561,11 @@ sub authenticate {
                 &radiusd::radlog(Error, "ssl_opts only supported with LWP 6. error: $@");
             }
         }
+		my $starttime = [gettimeofday];
         $response = $ua->post($URL, \%params);
         $content = $response->decoded_content();
+		my $elapsedtime = tv_interval($starttime);
+		&radiusd::radlog( Info, "elapsed time for privacyidea call: $elapsedtime" );
         if ($debug == true) {
             &radiusd::radlog(Debug, "Content $content");
         }
@@ -561,7 +574,8 @@ sub authenticate {
     if ($ENABLEPINCHANGE) {
         my $decoded;
         try {
-            $decoded = decode_json($content);
+			my $coder = JSON->new->ascii->pretty->allow_nonref;
+            $decoded = $coder->decode_json($content);
         } catch {
             &radiusd::radlog(Info, "Can not parse response from privacyIDEA.");
             &radiusd::radlog(Error, "caught error: $_");
@@ -684,16 +698,22 @@ sub authenticate {
                 }
                 elsif (!$decoded->{result}{status}) {
                     &radiusd::radlog(Info, "privacyIDEA Result status is false!");
-                    $RAD_REPLY{'Reply-Message'} = $decoded->{result}{error}{message};
-                    &radiusd::radlog(Info, "privacyIDEA access denied");
-                    #$RAD_REPLY{'Reply-Message'} = "privacyIDEA access denied";
-                    $g_return = RLM_MODULE_REJECT;
+					$RAD_REPLY{'Reply-Message'} = $decoded->{result}{error}{message};
+					&radiusd::radlog( Info, $decoded->{result}{error}{message});
+					my $errorcode = $decoded->{result}{error}{code};
+					if ($errorcode == 904) {
+						$g_return = RLM_MODULE_NOTFOUND;
+					} else {
+						$g_return = RLM_MODULE_FAIL;
+					}
+					&radiusd::radlog( Info, "privacyIDEA failed to handle the request" );
                 }
             }
         }
         catch {
-            &radiusd::radlog(Info, "Can not parse response from privacyIDEA.");
-            &radiusd::radlog(Error, "caught error: $_");
+            my $e = shift;
+            &radiusd::radlog( Info, "$e");
+			&radiusd::radlog( Info, "Can not parse response from privacyIDEA." );
         };
     } else {
         # handle /validate/check response
@@ -705,9 +725,9 @@ sub authenticate {
             $g_return = RLM_MODULE_FAIL;
         }
         try {
-            my $decoded = decode_json($content);
+			my $coder = JSON->new->ascii->pretty->allow_nonref;
+            my $decoded = $coder->decode_json($content);
             my $message = $decoded->{detail}{message};
-            my $pin_change_requested = $decoded->{detail}{pin_change};
             if ($decoded->{result}{value}) {
                 &radiusd::radlog(Info, "privacyIDEA access granted");
                 $RAD_REPLY{'Reply-Message'} = "privacyIDEA access granted";
@@ -740,17 +760,22 @@ sub authenticate {
             elsif (!$decoded->{result}{status}) {
                 &radiusd::radlog(Info, "privacyIDEA Result status is false!");
                 $RAD_REPLY{'Reply-Message'} = $decoded->{result}{error}{message};
-                &radiusd::radlog(Info, "privacyIDEA access denied");
-                #$RAD_REPLY{'Reply-Message'} = "privacyIDEA access denied";
-                $g_return = RLM_MODULE_REJECT;
-            }
+				&radiusd::radlog( Info, $decoded->{result}{error}{message});
+                my $errorcode = $decoded->{result}{error}{code};
+				if ($errorcode == 904) {
+					$g_return = RLM_MODULE_NOTFOUND;
+				} else {
+					$g_return = RLM_MODULE_FAIL;
+				}
+				&radiusd::radlog( Info, "privacyIDEA failed to handle the request" );
+			}
         }
         catch {
-            &radiusd::radlog(Info, "Can not parse response from privacyIDEA.");
-            &radiusd::radlog(Error, "caught error: $_");
+			my $e = shift;
+            &radiusd::radlog( Info, "$e");
+			&radiusd::radlog( Info, "Can not parse response from privacyIDEA." );
         };
     }
-
 
     &radiusd::radlog( Info, "return $ret_hash->{$g_return}" );
     return $g_return;
