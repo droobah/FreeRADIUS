@@ -360,7 +360,6 @@ sub authenticate {
     my $URL_SETPIN = $Config->{URL_SETPIN};
     my $REALM   = $Config->{REALM};
     my $RESCONF = $Config->{RESCONF};
-    my $ENABLEPINCHANGE = $Config->{ENABLEPINCHANGE};
     
     my $debug   = false;
     if ( $Config->{Debug} =~ /true/i ) {
@@ -371,6 +370,11 @@ sub authenticate {
     my $check_ssl = false;
     if ( $Config->{SSL_CHECK} =~ /true/i ) {
 		$check_ssl = true;
+    }
+
+    my $enable_pin_change = false;
+    if ( $Config->{ENABLEPINCHANGE} =~ /true/i ) {
+		$enable_pin_change = true;
     }
 
     my $timeout = $Config->{TIMEOUT};
@@ -396,9 +400,6 @@ sub authenticate {
         }  
         if ( ( $cfg_file->val( $auth_type, "RESCONF") )) {
             $RESCONF = $cfg_file->val( $auth_type, "RESCONF" );
-        }
-        if ( ( $cfg_file->val( $auth_type, "ENABLEPINCHANGE") )) {
-            $ENABLEPINCHANGE = $cfg_file->val( $auth_type, "ENABLEPINCHANGE" );
         }
     } catch {
         &radiusd::radlog( Info, "Warning: $@" );
@@ -456,7 +457,7 @@ sub authenticate {
     my $use_saved_request = false;
     my %saved_request;
     my $new_pin;
-    if ($ENABLEPINCHANGE) {
+    if ($enable_pin_change) {
         $URL = $URL_AUTH;
 
         #check for an existing pin-change transaction
@@ -572,7 +573,7 @@ sub authenticate {
         }
     }
 
-    if ($ENABLEPINCHANGE) {
+    if ($enable_pin_change) {
         my $decoded;
         try {
             $decoded = $coder->decode($content);
