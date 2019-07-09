@@ -151,6 +151,8 @@ use Data::Dump;
 use Try::Tiny;
 use JSON;
 use Time::HiRes qw( gettimeofday tv_interval );
+use Cache::Memcached::Fast;
+use Data::UUID;
 use Date::Parse;
 use Date::Format;
 
@@ -159,7 +161,7 @@ use Date::Format;
 # This is very important ! Without this script will not get the filled hashes from main.
 use vars qw(%RAD_REQUEST %RAD_REPLY %RAD_CHECK %RAD_CONFIG );
 
-# This is hash wich hold original request from radius
+# This is hash which hold original request from radius
 #my %RAD_REQUEST;
 # In this hash you add values that will be returned to NAS.
 #my %RAD_REPLY;
@@ -208,6 +210,7 @@ use constant Acct  => 6;
 our $CONFIG_FILE = "";
 our @CONFIG_FILES = ("/etc/privacyidea/rlm_perl.ini", "/etc/freeradius/rlm_perl.ini", "/opt/privacyIDEA/rlm_perl.ini");
 our $Config = {};
+our $MemcacheCfg;
 our $Mapping = {};
 our $cfg_file;
 
@@ -215,6 +218,7 @@ our $cfg_file;
     $Config->{URL}     = 'https://127.0.0.1/validate/check';
     $Config->{AUTHURL} = 'https://127.0.0.1/auth';
     $Config->{POLLURL} = 'https://127.0.0.1/token/challenges';
+    $Config->{PINURL}  = 'https://127.0.0.1/token/setpin';
     $Config->{PIUSER}  = '';
     $Config->{PIPASS}  = '';
     $Config->{REALM}   = '';
@@ -224,6 +228,10 @@ our $cfg_file;
     $Config->{SSL_CHECK} = "FALSE";
     $Config->{TIMEOUT} = 10;
     $Config->{SPLIT_NULL_BYTE} = "FALSE";
+    $Config->{ENABLE_PIN_CHANGE} = "FALSE";
+
+    $MemcacheCfg->{servers} = ["127.0.0.1:11211"];
+    $MemcacheCfg->{namespace} = 'PIRA:';
 
 
 foreach my $file (@CONFIG_FILES) {
@@ -234,17 +242,49 @@ foreach my $file (@CONFIG_FILES) {
 	    $Config->{URL} = $cfg_file->val("Default", "URL");
         $Config->{AUTHURL} = $cfg_file->val("Default", "AUTHURL");
         $Config->{POLLURL} = $cfg_file->val("Default", "POLLURL");
+        $Config->{PINURL} = $cfg_file->val("Default", "PINURL");
         $Config->{PIUSER} = $cfg_file->val("Default", "PIUSER");
         $Config->{PIPASS} = $cfg_file->val("Default", "PIPASS");
 	    $Config->{REALM}   = $cfg_file->val("Default", "REALM");
 	    $Config->{RESCONF} = $cfg_file->val("Default", "RESCONF");
 	    $Config->{Debug}   = $cfg_file->val("Default", "DEBUG");
         $Config->{SPLIT_NULL_BYTE} = $cfg_file->val("Default", "SPLIT_NULL_BYTE");
+        $Config->{ENABLE_PIN_CHANGE} = $cfg_file->val("Default", "ENABLE_PIN_CHANGE");
 	    $Config->{SSL_CHECK} = $cfg_file->val("Default", "SSL_CHECK");
 	    $Config->{TIMEOUT} = $cfg_file->val("Default", "TIMEOUT", 10);
         $Config->{CLIENTATTRIBUTE} = $cfg_file->val("Default", "CLIENTATTRIBUTE");
 	}
 }
+
+# Pin Change - Memcached functionality
+sub saveResponse {
+    my $transactionid = shift;
+    my $subtask = shift;
+    my $data = shift;
+    my $lastpin = shift;
+
+    my $memd = new Cache::Memcached::Fast($MemcacheCfg);
+    $memd->set($transactionid, {'subtask' => $subtask, 'data' => $data, 'lastpin' => $lastpin});
+}
+
+sub loadResponse {
+    my $transactionid = shift;
+    my %savedResponse;
+
+    my $memd = new Cache::Memcached::Fast($MemcacheCfg);
+    my $tmp = $memd->get($transactionid);
+    if ($tmp) { %savedResponse = %{$tmp} };
+
+    return %savedResponse;
+}
+
+sub removeResponse {
+    my $transactionid = shift;
+
+    my $memd = new Cache::Memcached::Fast($MemcacheCfg);
+    $memd->delete($transactionid);
+}
+######################################
 
 sub mapResponse {
 	# This function maps the Mapping sections in rlm_perl.ini
@@ -318,6 +358,68 @@ sub mapResponse {
 	return %radReply;
 }
 
+# Function to update OTP PIN for token
+sub updateTokenPIN{
+    my $token_serial = shift;
+    my $new_pin = shift;
+    my $PIUSER = shift;
+    my $PIPASS = shift;
+    my $AUTHURL = shift;
+    my $PINURL = shift;
+    my $ua = shift;
+
+    my $response;
+    my $content;
+    my $starttime;
+    my $elapsedtime;
+    my $coder = JSON->new->ascii->pretty->allow_nonref;
+
+    my %params = ();
+    $params{"username"} = $PIUSER;
+    $params{"password"} = $PIPASS;
+
+    # send /auth to privacyIDEA to get token
+    &radiusd::radlog( Info, "privacyIDEA auth request" );
+    $starttime = [ gettimeofday ];
+    $response = $ua->post($AUTHURL, \%params);
+    $content = $response->decoded_content();
+    $elapsedtime = tv_interval($starttime);
+    &radiusd::radlog( Info, "elapsed time for privacyidea call: $elapsedtime" );
+    &radiusd::radlog( Debug, "Content $content" );
+
+    try {
+        my $decoded = $coder->decode($content);
+        if ($response->is_success && $decoded->{result}{value}) {
+            my $auth_token = $decoded->{result}{value}{token};
+            $ua->default_header('Authorization' => $auth_token);
+
+            #send pin change request
+            %params = ();
+            $params{"serial"} = $token_serial;
+            $params{"otppin"} = $new_pin;
+
+            &radiusd::radlog( Info, "privacyIDEA setpin request" );
+            $starttime = [ gettimeofday ];
+            $response = $ua->post($PINURL, \%params);
+            $content = $response->decoded_content();
+            $elapsedtime = tv_interval($starttime);
+            &radiusd::radlog( Info, "elapsed time for privacyidea call: $elapsedtime" );
+            &radiusd::radlog( Debug, "Content $content" );
+
+            $decoded = $coder->decode($content);
+            if ($response->is_success && $decoded->{result}{value}) {
+                &radiusd::radlog( Info, "privacyIDEA pin set successful" );
+            } else {
+                &radiusd::radlog( Info, "privacyIDEA pin set failed!" );
+            }
+        }
+    } catch {
+        my $e = shift;
+        &radiusd::radlog( Info, "$e");
+        &radiusd::radlog( Info, "Can not parse response from privacyIDEA." );
+    }
+}
+
 # Function to handle authenticate
 sub authenticate {
 
@@ -329,6 +431,7 @@ sub authenticate {
     my $URL     = $Config->{URL};
     my $AUTHURL = $Config->{AUTHURL};
     my $POLLURL = $Config->{POLLURL};
+    my $PINURL = $Config->{PINURL};
     my $PIUSER = $Config->{PIUSER};
     my $PIPASS = $Config->{PIPASS};
     my $REALM   = $Config->{REALM};
@@ -343,6 +446,11 @@ sub authenticate {
     my $check_ssl = false;
     if ( $Config->{SSL_CHECK} =~ /true/i ) {
 		$check_ssl = true;
+    }
+
+    my $enable_pin_change = false;
+    if ( $Config->{ENABLE_PIN_CHANGE} =~ /true/i ) {
+        $enable_pin_change = true;
     }
 
     my $timeout = $Config->{TIMEOUT};
@@ -362,6 +470,9 @@ sub authenticate {
         }
         if ( ( $cfg_file->val( $auth_type, "POLLURL") )) {
             $POLLURL = $cfg_file->val( $auth_type, "POLLURL" );
+        }
+        if ( ( $cfg_file->val( $auth_type, "PINURL") )) {
+            $PINURL = $cfg_file->val( $auth_type, "PINURL" );
         }
         if ( ( $cfg_file->val( $auth_type, "PIUSER") )) {
             $PIUSER = $cfg_file->val( $auth_type, "PIUSER" );
@@ -424,23 +535,11 @@ sub authenticate {
         $params{"resConf"} = $RESCONF;
     }
 
-    &radiusd::radlog( Info, "Auth-Type: $auth_type" );
-    &radiusd::radlog( Info, "url: $URL" );
-    &radiusd::radlog( Info, "pollurl: $POLLURL" );
-    &radiusd::radlog( Info, "authurl: $AUTHURL" );
-    &radiusd::radlog( Info, "user sent to privacyidea: $params{'user'}" );
-    &radiusd::radlog( Info, "realm sent to privacyidea: $params{'realm'}" );
-    &radiusd::radlog( Info, "resolver sent to privacyidea: $params{'resConf'}" );
-    &radiusd::radlog( Info, "client sent to privacyidea: $params{'client'}" );
-    &radiusd::radlog( Info, "state sent to privacyidea: $params{'state'}" );
-    if ( $debug == true ) {
-        &radiusd::radlog( Debug, "urlparam $_ = $params{$_}\n" )
-          for ( keys %params );
-    }
-    else {
-        &radiusd::radlog( Info, "urlparam $_ \n" ) for ( keys %params );
-    }
-
+    my $response;
+    my $content;
+    my $starttime;
+    my $elapsedtime;
+    my $coder = JSON->new->ascii->pretty->allow_nonref;
     my $ua = LWP::UserAgent->new();
     $ua->env_proxy;
     $ua->timeout($timeout);
@@ -456,18 +555,111 @@ sub authenticate {
             &radiusd::radlog( Error, "ssl_opts only supported with LWP 6. error: $@" );
 		}
 	}
-    my $starttime = [gettimeofday];
-    my $response = $ua->post( $URL, \%params );
-    my $content  = $response->decoded_content();
-    my $elapsedtime = tv_interval($starttime);
-    &radiusd::radlog( Info, "elapsed time for privacyidea call: $elapsedtime" );
-    if ( $debug == true ) {
-        &radiusd::radlog( Debug, "Content $content" );
+
+    # If PIN Change is enabled, load the last response
+    my $use_saved_request = false;
+    my %saved_request;
+    my $new_pin;
+    if ($enable_pin_change) {
+        #check for an existing pin-change transaction
+        if ($params{'state'}) {
+            %saved_request = loadResponse($params{'state'});
+            if (%saved_request) {
+                if ($saved_request{subtask} eq "pin_save") {
+                    #only need the PIN to be used later
+                    $new_pin = $saved_request{lastpin};
+                } else {
+                    #will be using the whole request instead of requesting a new one
+                    $use_saved_request = true;
+                }
+                removeResponse($params{'state'});
+            }
+        }
     }
+
+    #default to deny access
     $RAD_REPLY{'Reply-Message'} = "privacyIDEA server denied access!";
     my $g_return = RLM_MODULE_REJECT;
 
-    if ( !$response->is_success ) {
+    if ($use_saved_request) {
+        &radiusd::radlog(Debug, "Using saved request data");
+
+        $content = $saved_request{'data'};
+        my $decoded = $coder->decode($content);
+        my $currentpin = $params{'pass'};
+        # check to see which state we're in
+        # 1. initial pin-set
+        # 2. confirm pin
+        # 3. return to standard flow
+        if ($saved_request{'subtask'} eq "pin_set") {
+            # send a request to confirm the PIN
+            my $pin_transaction = Data::UUID->new->create_str();
+            saveResponse($pin_transaction,'pin_confirm',$content,$currentpin);
+
+            #before granting access, we must ask the user to update their PIN
+            &radiusd::radlog(Info, "privacyIDEA confirm new PIN");
+
+            $RAD_REPLY{'Reply-Message'} = "\r\nPlease re-enter new PIN:";
+            $RAD_REPLY{'State'} = $pin_transaction;
+            &radiusd::radlog(Debug, $RAD_REPLY{'State'});
+            $RAD_CHECK{'Response-Packet-Type'} = "Access-Challenge";
+            # Add the response hash to the Radius Reply
+            %RAD_REPLY = (%RAD_REPLY, mapResponse($decoded));
+            $g_return = RLM_MODULE_HANDLED;
+            &radiusd::radlog(Info, "return $ret_hash->{$g_return}");
+            return $g_return;
+        } elsif ($saved_request{'subtask'} eq "pin_confirm") {
+            if ($saved_request{'lastpin'} eq $currentpin) {
+                &radiusd::radlog(Info, "privacyIDEA PIN set successful");
+
+                $new_pin = $currentpin;
+                # inject the previous content into the stream
+                delete $decoded->{detail}{pin_change}; # prevent a PIN change loop
+                $content = encode_json($decoded);
+                if ($debug == true) {
+                    &radiusd::radlog(Debug, "Content $content");
+                }
+            } else {
+                # confirmed PIN doesn't match - auth fail
+                &radiusd::radlog(Debug, "privacyIDEA PIN confirmation incorrect");
+                &radiusd::radlog(Info, "return $ret_hash->{$g_return}");
+                return $g_return;
+            }
+        } else {
+            # invalid subtask. fail the auth
+            &radiusd::radlog(Debug, "privacyIDEA Invalid PIN Change State - $saved_request{'subtask'}");
+            &radiusd::radlog(Info, "return $ret_hash->{$g_return}");
+            return $g_return;
+        }
+    } else {
+        &radiusd::radlog( Info, "Auth-Type: $auth_type" );
+        &radiusd::radlog( Info, "url: $URL" );
+        &radiusd::radlog( Info, "pollurl: $POLLURL" );
+        &radiusd::radlog( Info, "pinurl: $PINURL");
+        &radiusd::radlog( Info, "authurl: $AUTHURL" );
+        &radiusd::radlog( Info, "user sent to privacyidea: $params{'user'}" );
+        &radiusd::radlog( Info, "realm sent to privacyidea: $params{'realm'}" );
+        &radiusd::radlog( Info, "resolver sent to privacyidea: $params{'resConf'}" );
+        &radiusd::radlog( Info, "client sent to privacyidea: $params{'client'}" );
+        &radiusd::radlog( Info, "state sent to privacyidea: $params{'state'}" );
+        if ( $debug == true ) {
+            &radiusd::radlog( Debug, "urlparam $_ = $params{$_}\n" ) for ( keys %params );
+        }
+        else {
+            &radiusd::radlog( Info, "urlparam $_ \n" ) for ( keys %params );
+        }
+
+        $starttime = [ gettimeofday ];
+        $response = $ua->post($URL, \%params);
+        $content = $response->decoded_content();
+        $elapsedtime = tv_interval($starttime);
+        &radiusd::radlog( Info, "elapsed time for privacyidea call: $elapsedtime" );
+        if ( $debug == true ) {
+            &radiusd::radlog( Debug, "Content $content" );
+        }
+    }
+
+    if ( $response && !$response->is_success ) {
         # This was NO OK 200 response
         my $status = $response->status_line;
         &radiusd::radlog( Info, "privacyIDEA request failed: $status" );
@@ -475,15 +667,41 @@ sub authenticate {
         $g_return = RLM_MODULE_FAIL;
     }
     try {
-	    my $coder = JSON->new->ascii->pretty->allow_nonref;
 	    my $decoded = $coder->decode($content);
-        my $message = $decoded->{detail}{message};
+        my $pin_change_requested = $decoded->{detail}{pin_change};
+
+        #check for a pin change
+        if ($enable_pin_change && $pin_change_requested) {
+            my $pin_transaction = Data::UUID->new->create_str();
+            &radiusd::radlog(Info, "privacyIDEA PIN change flag detected");
+            &radiusd::radlog(Debug, $pin_transaction);
+            saveResponse($pin_transaction,'pin_set',$content,"");
+
+            #before granting access, we must ask the user to update their PIN
+            &radiusd::radlog(Info, "privacyIDEA requesting new PIN");
+
+            $RAD_REPLY{'Reply-Message'} = "\r\nEnter a new PIN having from 4 to 8 digits:";
+            $RAD_REPLY{'State'} = $pin_transaction;
+            &radiusd::radlog(Debug, $RAD_REPLY{'State'});
+            $RAD_CHECK{'Response-Packet-Type'} = "Access-Challenge";
+            # Add the response hash to the Radius Reply
+            %RAD_REPLY = (%RAD_REPLY, mapResponse($decoded));
+            $g_return = RLM_MODULE_HANDLED;
+            return $g_return;
+        }
+
         if ( $decoded->{result}{value} ) {
             &radiusd::radlog( Info, "privacyIDEA access granted" );
             $RAD_REPLY{'Reply-Message'} = "privacyIDEA access granted";
             # Add the response hash to the Radius Reply
             %RAD_REPLY = ( %RAD_REPLY, mapResponse($decoded));
             $g_return = RLM_MODULE_OK;
+
+            # if new_pin is available, send the PIN set request
+            if ($enable_pin_change && $new_pin) {
+                my $token_serial = $decoded->{detail}{serial};
+                updateTokenPIN($token_serial,$new_pin,$PIUSER,$PIPASS,$AUTHURL,$PINURL,$ua);
+            }
         }
         elsif ( $decoded->{result}{status} ) {
             &radiusd::radlog( Info, "privacyIDEA Result status is true!" );
@@ -555,6 +773,11 @@ sub authenticate {
                                             %RAD_REPLY = ( %RAD_REPLY, mapResponse($decoded));
                                             $g_return = RLM_MODULE_OK;
                                             $continue_poll = false;
+
+                                            # if new_pin is available, send the PIN set request
+                                            if ($enable_pin_change && $new_pin) {
+                                                updateTokenPIN($token_serial,$new_pin,$PIUSER,$PIPASS,$AUTHURL,$PINURL,$ua);
+                                            }
                                             last;
                                         } else {
                                             # check for expiration of request
