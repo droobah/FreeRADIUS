@@ -214,24 +214,25 @@ our $MemcacheCfg;
 our $Mapping = {};
 our $cfg_file;
 
-    $Config->{FSTAT} = "not found!";
-    $Config->{URL}     = 'https://127.0.0.1/validate/check';
-    $Config->{AUTHURL} = 'https://127.0.0.1/auth';
-    $Config->{POLLURL} = 'https://127.0.0.1/token/challenges';
-    $Config->{PINURL}  = 'https://127.0.0.1/token/setpin';
-    $Config->{PIUSER}  = '';
-    $Config->{PIPASS}  = '';
-    $Config->{REALM}   = '';
-    $Config->{CLIENTATTRIBUTE} = '';
-    $Config->{RESCONF} = "";
-    $Config->{Debug}   = "FALSE";
-    $Config->{SSL_CHECK} = "FALSE";
-    $Config->{TIMEOUT} = 10;
-    $Config->{SPLIT_NULL_BYTE} = "FALSE";
-    $Config->{ENABLE_PIN_CHANGE} = "FALSE";
+$Config->{FSTAT} = "not found!";
+$Config->{URL}     = 'https://127.0.0.1/validate/check';
+$Config->{REALM}   = '';
+$Config->{CLIENTATTRIBUTE} = '';
+$Config->{RESCONF} = "";
+$Config->{Debug}   = "FALSE";
+$Config->{SSL_CHECK} = "FALSE";
+$Config->{TIMEOUT} = 10;
+$Config->{SPLIT_NULL_BYTE} = "FALSE";
+#Added Config
+$Config->{AUTHURL} = 'https://127.0.0.1/auth';
+$Config->{POLLURL} = 'https://127.0.0.1/token/challenges';
+$Config->{PINURL}  = 'https://127.0.0.1/token/setpin';
+$Config->{PIUSER}  = '';
+$Config->{PIPASS}  = '';
+$Config->{ENABLE_PIN_CHANGE} = "FALSE";
 
-    $MemcacheCfg->{servers} = ["127.0.0.1:11211"];
-    $MemcacheCfg->{namespace} = 'PIRA:';
+$MemcacheCfg->{servers} = ["127.0.0.1:11211"];
+$MemcacheCfg->{namespace} = 'PIRA:';
 
 
 foreach my $file (@CONFIG_FILES) {
@@ -240,19 +241,20 @@ foreach my $file (@CONFIG_FILES) {
 	    $CONFIG_FILE = $file;
 	    $Config->{FSTAT} = "found!";
 	    $Config->{URL} = $cfg_file->val("Default", "URL");
+	    $Config->{REALM}   = $cfg_file->val("Default", "REALM");
+	    $Config->{RESCONF} = $cfg_file->val("Default", "RESCONF");
+	    $Config->{Debug}   = $cfg_file->val("Default", "DEBUG");
+        $Config->{SPLIT_NULL_BYTE} = $cfg_file->val("Default", "SPLIT_NULL_BYTE");
+	    $Config->{SSL_CHECK} = $cfg_file->val("Default", "SSL_CHECK");
+	    $Config->{TIMEOUT} = $cfg_file->val("Default", "TIMEOUT", 10);
+        $Config->{CLIENTATTRIBUTE} = $cfg_file->val("Default", "CLIENTATTRIBUTE");
+        #Added Config
         $Config->{AUTHURL} = $cfg_file->val("Default", "AUTHURL");
         $Config->{POLLURL} = $cfg_file->val("Default", "POLLURL");
         $Config->{PINURL} = $cfg_file->val("Default", "PINURL");
         $Config->{PIUSER} = $cfg_file->val("Default", "PIUSER");
         $Config->{PIPASS} = $cfg_file->val("Default", "PIPASS");
-	    $Config->{REALM}   = $cfg_file->val("Default", "REALM");
-	    $Config->{RESCONF} = $cfg_file->val("Default", "RESCONF");
-	    $Config->{Debug}   = $cfg_file->val("Default", "DEBUG");
-        $Config->{SPLIT_NULL_BYTE} = $cfg_file->val("Default", "SPLIT_NULL_BYTE");
         $Config->{ENABLE_PIN_CHANGE} = $cfg_file->val("Default", "ENABLE_PIN_CHANGE");
-	    $Config->{SSL_CHECK} = $cfg_file->val("Default", "SSL_CHECK");
-	    $Config->{TIMEOUT} = $cfg_file->val("Default", "TIMEOUT", 10);
-        $Config->{CLIENTATTRIBUTE} = $cfg_file->val("Default", "CLIENTATTRIBUTE");
 	}
 }
 
@@ -292,69 +294,70 @@ sub mapResponse {
 	my $decoded = shift;
 	my %radReply;
 	my $topnode;
-	foreach my $group ($cfg_file->Groups) {
-		&radiusd::radlog( Info, "++++ Parsing group: $group\n");
-		foreach my $member ($cfg_file->GroupMembers($group)) {
-			&radiusd::radlog(Info, "+++++ Found member '$member'");
-			$member =~/(.*)\ (.*)/;
-			$topnode = $2;
-			if ($group eq "Mapping") {
-				foreach my $key ($cfg_file->Parameters($member)){
-					my $radiusAttribute = $cfg_file->val($member, $key);
-					&radiusd::radlog( Info, "++++++ Map: $topnode : $key -> $radiusAttribute");
-					$radReply{$radiusAttribute} = $decoded->{detail}{$topnode}{$key};
-				};
-			}
-			if ($group eq "Attribute") {
-				my $radiusAttribute = $topnode;
-				# opional overwrite radiusAttribute
-				my $ra = $cfg_file->val($member, "radiusAttribute");
-				if ($ra ne "") {
-					$radiusAttribute = $ra;
-				}
-				my $userAttribute = $cfg_file->val($member, "userAttribute");
-				my $regex = $cfg_file->val($member, "regex");
-				my $directory = $cfg_file->val($member, "dir");
-				my $prefix = $cfg_file->val($member, "prefix");
-				my $suffix = $cfg_file->val($member, "suffix");
-				&radiusd::radlog( Info, "++++++ Attribute: IF '$directory'->'$userAttribute' == '$regex' THEN '$radiusAttribute'");
-				my $attributevalue="";
-				if ($directory eq "") {
-					$attributevalue = $decoded->{detail}{$userAttribute};
-					&radiusd::radlog( Info, "++++++ no directory");
-				} else {
-					$attributevalue = $decoded->{detail}{$directory}{$userAttribute};
-					&radiusd::radlog( Info, "++++++ searching in directory $directory");
-				}
-				my @values = ();
-				if (ref($attributevalue) eq "") {
-					&radiusd::radlog(Info, "+++++++ User attribute is a string: $attributevalue");
-					push(@values, $attributevalue);
-				}
-				if (ref($attributevalue) eq "ARRAY") {
-					&radiusd::radlog(Info, "+++++++ User attribute is a list: $attributevalue");
-					@values = @$attributevalue;
-				}
-				foreach my $value (@values) {
-					&radiusd::radlog(Info, "+++++++ trying to match $value");
-					if ($value =~ /$regex/) {
-						my $result = $1;
-						$radReply{$radiusAttribute} = "$prefix$result$suffix";
-						&radiusd::radlog(Info, "++++++++ Result: Add RADIUS attribute $radiusAttribute = $result");
-					} else {
-						&radiusd::radlog(Info, "++++++++ Result: No match, no RADIUS attribute $radiusAttribute added.");
-					}
-				}
-			}
-		}
-	}
+    if ($cfg_file) {
+        foreach my $group ($cfg_file->Groups) {
+            &radiusd::radlog( Info, "++++ Parsing group: $group\n");
+            foreach my $member ($cfg_file->GroupMembers($group)) {
+                &radiusd::radlog(Info, "+++++ Found member '$member'");
+                $member =~/(.*)\ (.*)/;
+                $topnode = $2;
+                if ($group eq "Mapping") {
+                    foreach my $key ($cfg_file->Parameters($member)){
+                        my $radiusAttribute = $cfg_file->val($member, $key);
+                        &radiusd::radlog( Info, "++++++ Map: $topnode : $key -> $radiusAttribute");
+                        $radReply{$radiusAttribute} = $decoded->{detail}{$topnode}{$key};
+                    };
+                }
+                if ($group eq "Attribute") {
+                    my $radiusAttribute = $topnode;
+                    # opional overwrite radiusAttribute
+                    my $ra = $cfg_file->val($member, "radiusAttribute");
+                    if ($ra ne "") {
+                        $radiusAttribute = $ra;
+                    }
+                    my $userAttribute = $cfg_file->val($member, "userAttribute");
+                    my $regex = $cfg_file->val($member, "regex");
+                    my $directory = $cfg_file->val($member, "dir");
+                    my $prefix = $cfg_file->val($member, "prefix");
+                    my $suffix = $cfg_file->val($member, "suffix");
+                    &radiusd::radlog( Info, "++++++ Attribute: IF '$directory'->'$userAttribute' == '$regex' THEN '$radiusAttribute'");
+                    my $attributevalue="";
+                    if ($directory eq "") {
+                        $attributevalue = $decoded->{detail}{$userAttribute};
+                        &radiusd::radlog( Info, "++++++ no directory");
+                    } else {
+                        $attributevalue = $decoded->{detail}{$directory}{$userAttribute};
+                        &radiusd::radlog( Info, "++++++ searching in directory $directory");
+                    }
+                    my @values = ();
+                    if (ref($attributevalue) eq "") {
+                        &radiusd::radlog(Info, "+++++++ User attribute is a string: $attributevalue");
+                        push(@values, $attributevalue);
+                    }
+                    if (ref($attributevalue) eq "ARRAY") {
+                        &radiusd::radlog(Info, "+++++++ User attribute is a list: $attributevalue");
+                        @values = @$attributevalue;
+                    }
+                    foreach my $value (@values) {
+                        &radiusd::radlog(Info, "+++++++ trying to match $value");
+                        if ($value =~ /$regex/) {
+                            my $result = $1;
+                            $radReply{$radiusAttribute} = "$prefix$result$suffix";
+                            &radiusd::radlog(Info, "++++++++ Result: Add RADIUS attribute $radiusAttribute = $result");
+                        } else {
+                            &radiusd::radlog(Info, "++++++++ Result: No match, no RADIUS attribute $radiusAttribute added.");
+                        }
+                    }
+                }
+            }
+        }
 
-	foreach my $key ($cfg_file->Parameters("Mapping")) {
-		my $radiusAttribute = $cfg_file->val("Mapping", $key);
-		&radiusd::radlog( Info, "+++ Map: $key -> $radiusAttribute");
-		$radReply{$radiusAttribute} = $decoded->{detail}{$key};
-	}
-
+        foreach my $key ($cfg_file->Parameters("Mapping")) {
+            my $radiusAttribute = $cfg_file->val("Mapping", $key);
+            &radiusd::radlog( Info, "+++ Map: $key -> $radiusAttribute");
+            $radReply{$radiusAttribute} = $decoded->{detail}{$key};
+        }
+    }
 	return %radReply;
 }
 
@@ -427,15 +430,15 @@ sub authenticate {
     # in the module init we can't print this out, so it starts here
     &radiusd::radlog( Info, "Config File $CONFIG_FILE ".$Config->{FSTAT} );
 
-    # we inherrit the defaults
+    # we inherit the defaults
     my $URL     = $Config->{URL};
-    my $AUTHURL = $Config->{AUTHURL};
-    my $POLLURL = $Config->{POLLURL};
-    my $PINURL = $Config->{PINURL};
-    my $PIUSER = $Config->{PIUSER};
-    my $PIPASS = $Config->{PIPASS};
     my $REALM   = $Config->{REALM};
     my $RESCONF = $Config->{RESCONF};
+    my $AUTHURL = $Config->{AUTHURL};
+    my $POLLURL = $Config->{POLLURL};
+    my $PINURL  = $Config->{PINURL};
+    my $PIUSER  = $Config->{PIUSER};
+    my $PIPASS  = $Config->{PIPASS};
 
     my $debug   = false;
     if ( $Config->{Debug} =~ /true/i ) {
@@ -465,6 +468,13 @@ sub authenticate {
         if ( ( $cfg_file->val( $auth_type, "URL") )) {
             $URL = $cfg_file->val( $auth_type, "URL" );
         }
+        if ( ( $cfg_file->val( $auth_type, "REALM") )) {
+            $REALM = $cfg_file->val( $auth_type, "REALM" );
+        }
+        if ( ( $cfg_file->val( $auth_type, "RESCONF") )) {
+            $RESCONF = $cfg_file->val( $auth_type, "RESCONF" );
+        }
+        #Added Config
         if ( ( $cfg_file->val( $auth_type, "AUTHURL") )) {
             $AUTHURL = $cfg_file->val( $auth_type, "AUTHURL" );
         }
@@ -480,13 +490,8 @@ sub authenticate {
         if ( ( $cfg_file->val( $auth_type, "PIPASS") )) {
             $PIPASS = $cfg_file->val( $auth_type, "PIPASS" );
         }
-        if ( ( $cfg_file->val( $auth_type, "REALM") )) {
-            $REALM = $cfg_file->val( $auth_type, "REALM" );
-        }
-        if ( ( $cfg_file->val( $auth_type, "RESCONF") )) {
-            $RESCONF = $cfg_file->val( $auth_type, "RESCONF" );
-        }
-    } catch {
+    }
+    catch {
         &radiusd::radlog( Info, "Warning: $@" );
     };
 
@@ -565,9 +570,10 @@ sub authenticate {
         if ($params{'state'}) {
             %saved_request = loadResponse($params{'state'});
             if (%saved_request) {
-                if ($saved_request{subtask} eq "pin_save") {
+                if ($saved_request{'subtask'} eq "pin_save") {
                     #only need the PIN to be used later
-                    $new_pin = $saved_request{lastpin};
+                    &radiusd::radlog(Debug, "Using saved PIN");
+                    $new_pin = $saved_request{'lastpin'};
                 } else {
                     #will be using the whole request instead of requesting a new one
                     $use_saved_request = true;
@@ -610,8 +616,7 @@ sub authenticate {
             return $g_return;
         } elsif ($saved_request{'subtask'} eq "pin_confirm") {
             if ($saved_request{'lastpin'} eq $currentpin) {
-                &radiusd::radlog(Info, "privacyIDEA PIN set successful");
-
+                &radiusd::radlog(Info, "privacyIDEA PIN entry successful");
                 $new_pin = $currentpin;
                 # inject the previous content into the stream
                 delete $decoded->{detail}{pin_change}; # prevent a PIN change loop
@@ -808,6 +813,11 @@ sub authenticate {
                     # Add the response hash to the Radius Reply
                     %RAD_REPLY = (%RAD_REPLY, mapResponse($decoded));
                     $g_return = RLM_MODULE_HANDLED;
+
+                    #if new_pin is available, save it off for next request so we don't lose it
+                    if ($new_pin) {
+                        saveResponse($RAD_REPLY{'State'},"pin_save","",$new_pin);
+                    }
                 }
             } else {
                 &radiusd::radlog( Info, "privacyIDEA access denied" );
