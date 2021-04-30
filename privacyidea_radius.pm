@@ -1,5 +1,12 @@
 #
 #    privacyIDEA FreeRADIUS plugin
+#    2020-09-09 Cornelius Kölbel <cornelius.koelbel@netknights.it>
+#               Add Packet-Src-IP-Address as fallback for client IP.
+#    2020-03-21 Cornelius Kölbel <cornelius.koelbel@netknights.it>
+#               Add ADD_EMPTY_PASS to send an empty password to
+#               privacyIDEA in case no password is given.
+#               Allow config section to have different modules
+#               with different config files.
 #    2019-03-17 Cornelius Kölbel <cornelius.koelbel@netknights.it>
 #               Add password splitting
 #    2018-01-12 Cornelius Kölbel <cornelius.koelbel@netknights.it>
@@ -12,7 +19,7 @@
 #    2016-08-13 Cornelius Kölbel <cornelius.koelbel@netknights.it>
 #               Add user-agent to be displayed in
 #               privacyIDEA Client Applicaton Type
-#    2015-10-10 Cornelius Kölbel <cornelius.koelbel@nektnights.it>
+#    2015-10-10 Cornelius Kölbel <cornelius.koelbel@netknights.it>
 #               Add privacyIDEA-Serial to the response.
 #    2015-10-09 Cornelius Kölbel <cornelius.koelbel@netknights.it>
 #               Improve the reading of the config file.
@@ -155,7 +162,7 @@ use Time::HiRes qw( gettimeofday tv_interval );
 
 # use ...
 # This is very important ! Without this script will not get the filled hashes from main.
-use vars qw(%RAD_REQUEST %RAD_REPLY %RAD_CHECK %RAD_CONFIG );
+use vars qw(%RAD_REQUEST %RAD_REPLY %RAD_CHECK %RAD_CONFIG %RAD_PERLCONF);
 
 # This is hash wich hold original request from radius
 #my %RAD_REQUEST;
@@ -203,8 +210,17 @@ use constant Proxy => 5;
 use constant Acct  => 6;
 
 
-our $CONFIG_FILE = "";
+# You can configure, which config file to use in the perl module definition:
+# perl privacyIDEA-A {
+#   filename = /usr/share/privacyidea/freeradius/privacyidea_radius.pm
+#   config {
+#        configfile = /etc/privacyidea/rlm_perl-A.ini
+#        }
+# }
+our $CONFIG_FILE = $RAD_PERLCONF{'configfile'};
 our @CONFIG_FILES = ("/etc/privacyidea/rlm_perl.ini", "/etc/freeradius/rlm_perl.ini", "/opt/privacyIDEA/rlm_perl.ini");
+
+
 our $Config = {};
 our $Mapping = {};
 our $cfg_file;
@@ -218,7 +234,11 @@ $Config->{Debug}   = "FALSE";
 $Config->{SSL_CHECK} = "FALSE";
 $Config->{TIMEOUT} = 10;
 $Config->{SPLIT_NULL_BYTE} = "FALSE";
+$Config->{ADD_EMPTY_PASS} = "FALSE";
 
+if ($CONFIG_FILE) {
+    @CONFIG_FILES = ($CONFIG_FILE);
+}
 
 foreach my $file (@CONFIG_FILES) {
     if (( -e $file )) {
@@ -230,10 +250,28 @@ foreach my $file (@CONFIG_FILES) {
         $Config->{RESCONF} = $cfg_file->val("Default", "RESCONF");
         $Config->{Debug}   = $cfg_file->val("Default", "DEBUG");
         $Config->{SPLIT_NULL_BYTE} = $cfg_file->val("Default", "SPLIT_NULL_BYTE");
+        $Config->{ADD_EMPTY_PASS} = $cfg_file->val("Default", "ADD_EMPTY_PASS");
         $Config->{SSL_CHECK} = $cfg_file->val("Default", "SSL_CHECK");
         $Config->{TIMEOUT} = $cfg_file->val("Default", "TIMEOUT", 10);
         $Config->{CLIENTATTRIBUTE} = $cfg_file->val("Default", "CLIENTATTRIBUTE");
     }
+}
+
+sub add_reply_attibute {
+
+    my $radReply = shift;
+    my $newValue = shift;
+
+    if (ref($radReply) eq "ARRAY") {
+        # This is an array, there is already a value to this replyAttribute
+        #&radiusd::radlog( Info, "Adding $newValue to the Reply Attribute, being an array.\n");
+        push @$radReply, $newValue;
+    } else {
+        # This is an empty replyValue, we add the first value
+        #&radiusd::radlog( Info, "Adding $newValue to the Reply Attribute, being a string.\n");
+        $radReply = [$newValue];
+    }
+    return $radReply;
 }
 
 sub mapResponse {
@@ -253,7 +291,8 @@ sub mapResponse {
                     foreach my $key ($cfg_file->Parameters($member)){
                         my $radiusAttribute = $cfg_file->val($member, $key);
                         &radiusd::radlog( Info, "++++++ Map: $topnode : $key -> $radiusAttribute");
-                        $radReply{$radiusAttribute} = $decoded->{detail}{$topnode}{$key};
+                        my $newValue = $decoded->{detail}{$topnode}{$key};
+                        $radReply{$radiusAttribute} = add_reply_attibute($radReply{$radiusAttribute}, $newValue);
                     };
                 }
                 if ($group eq "Attribute") {
@@ -290,7 +329,7 @@ sub mapResponse {
                         &radiusd::radlog(Info, "+++++++ trying to match $value");
                         if ($value =~ /$regex/) {
                             my $result = $1;
-                            $radReply{$radiusAttribute} = "$prefix$result$suffix";
+                            $radReply{$radiusAttribute} = add_reply_attibute($radReply{$radiusAttribute}, "$prefix$result$suffix");
                             &radiusd::radlog(Info, "++++++++ Result: Add RADIUS attribute $radiusAttribute = $result");
                         } else {
                             &radiusd::radlog(Info, "++++++++ Result: No match, no RADIUS attribute $radiusAttribute added.");
@@ -303,7 +342,7 @@ sub mapResponse {
         foreach my $key ($cfg_file->Parameters("Mapping")) {
             my $radiusAttribute = $cfg_file->val("Mapping", $key);
             &radiusd::radlog( Info, "+++ Map: $key -> $radiusAttribute");
-            $radReply{$radiusAttribute} = $decoded->{detail}{$key};
+            $radReply{$radiusAttribute} = add_reply_attibute($radReply{$radiusAttribute}, $decoded->{detail}{$key});
         }
     }
     return %radReply;
@@ -382,13 +421,20 @@ sub authenticate {
             $password = @p[0];
         }
         $params{"pass"} = $password;
+    } elsif ( $Config->{ADD_EMPTY_PASS} =~ /true/i ) {
+        $params{"pass"} = "";
     }
     if ( exists( $RAD_REQUEST{'NAS-IP-Address'} ) ) {
         $params{"client"} = $RAD_REQUEST{'NAS-IP-Address'};
+        &radiusd::radlog( Info, "Setting client IP to $params{'client'}." );
+    } elsif ( exists( $RAD_REQUEST{'Packet-Src-IP-Address'} ) ) {
+        $params{"client"} = $RAD_REQUEST{'Packet-Src-IP-Address'};
+        &radiusd::radlog( Info, "Setting client IP to $params{'client'}." );
     }
     if (exists ( $Config->{CLIENTATTRIBUTE} ) ) {
         if ( exists( $RAD_REQUEST{$Config->{CLIENTATTRIBUTE}} ) ) {
             $params{"client"} = $RAD_REQUEST{$Config->{CLIENTATTRIBUTE}};
+            &radiusd::radlog( Info, "Setting client IP to $params{'client'}." );
         }
     }
     if ( length($REALM) > 0 ) {
@@ -505,15 +551,13 @@ sub authenticate {
 }
 
 sub log_request_attributes {
-
     # This shouldn't be done in production environments!
     # This is only meant for debugging!
     for ( keys %RAD_REQUEST ) {
         &radiusd::radlog( Debug, "RAD_REQUEST: $_ = $RAD_REQUEST{$_}" );
-        ;
     }
-
 }
+
 
 # Function to handle authorize
 sub authorize {
